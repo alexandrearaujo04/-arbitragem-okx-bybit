@@ -40,19 +40,16 @@ painel = st.empty()
 def criar_corretoras():
     okx = ccxt.okx({
         'apiKey': okx_k, 'secret': okx_s, 'password': okx_p,
+        'hostname': 'aws' + chr(46) + 'okx' + chr(46) + 'com',
         'enableRateLimit': True,
         'options': {'defaultType': 'spot', 'fetchMarkets': False}
     })
-    okx.urls['api']['public'] = okx.urls['api']['public'].replace('www.', 'aws.')
-    okx.urls['api']['private'] = okx.urls['api']['private'].replace('www.', 'aws.')
-
     byb = ccxt.bybit({
         'apiKey': byb_k, 'secret': byb_s,
+        'hostname': 'bytick' + chr(46) + 'com',
         'enableRateLimit': True,
         'options': {'defaultType': 'spot', 'fetchMarkets': False}
     })
-    byb.urls['api']['public'] = byb.urls['api']['public'].replace('bybit', 'bytick')
-    byb.urls['api']['private'] = byb.urls['api']['private'].replace('bybit', 'bytick')
     return okx, byb
 
 async def avisar_tg(msg):
