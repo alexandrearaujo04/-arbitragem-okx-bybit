@@ -37,14 +37,33 @@ if c2.button("⏹ Parar", use_container_width=True):
 
 painel = st.empty()
 
+def criar_corretoras():
+    okx = ccxt.okx({
+        'apiKey': okx_k, 'secret': okx_s, 'password': okx_p,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot', 'fetchMarkets': False}
+    })
+    okx.urls['api']['public'] = okx.urls['api']['public'].replace('www.', 'aws.')
+    okx.urls['api']['private'] = okx.urls['api']['private'].replace('www.', 'aws.')
+
+    byb = ccxt.bybit({
+        'apiKey': byb_k, 'secret': byb_s,
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot', 'fetchMarkets': False}
+    })
+    byb.urls['api']['public'] = byb.urls['api']['public'].replace('bybit', 'bytick')
+    byb.urls['api']['private'] = byb.urls['api']['private'].replace('bybit', 'bytick')
+    return okx, byb
+
 async def avisar_tg(msg):
     if tg_token and tg_chat:
-        url = f"https://telegram.org{tg_token}/sendMessage"
+        base = "api" + chr(46) + "telegram" + chr(46) + "org"
+        url = f"https://{base}/bot{tg_token}/sendMessage"
         async with aiohttp.ClientSession() as s:
             await s.post(url, json={"chat_id": tg_chat, "text": msg}, timeout=5)
 
 def calc(p_comp, v_comp, t_comp, p_vend, v_vend, t_vend):
-    qtd = min(capital / p_comp, v_comp, v_vend)
+    qtd = min(capital / p_comp, v_comp or 1.0, v_vend or 1.0)
     if qtd <= 0:
         return 0.0, 0.0, 0.0
     custo = (qtd * p_comp) * (1 + t_comp)
@@ -52,68 +71,80 @@ def calc(p_comp, v_comp, t_comp, p_vend, v_vend, t_vend):
     lucro = receita - custo
     return round(qtd, 6), lucro, (lucro / custo) * 100
 
-async def executar(qtd, dir_op, lucro_est):
-    okx = ccxt.okx({'apiKey': okx_k, 'secret': okx_s, 'password': okx_p, 'hostname': '://okx.com', 'options': {'fetchMarkets': False}})
-    byb = ccxt.bybit({'apiKey': byb_k, 'secret': byb_s, 'hostname': 'bytick.com', 'options': {'fetchMarkets': False}})
-    ex_c = okx if dir_op == "OKX->BYB" else byb
-    ex_v = byb if dir_op == "OKX->BYB" else okx
-    rc, rv = await asyncio.gather(
-        ex_c.create_market_buy_order('BTC/USDT', qtd),
-        ex_v.create_market_sell_order('BTC/USDT', qtd),
-        return_exceptions=True
-    )
-    ok_c, ok_v = not isinstance(rc, Exception), not isinstance(rv, Exception)
-    if ok_c and not ok_v:
-        await ex_c.create_market_sell_order('BTC/USDT', round(qtd * 0.9985, 6))
-        status = f"TRAVA: Venda falhou, compra revertida ({rv})"
-    elif ok_v and not ok_c:
-        await ex_v.create_market_buy_order('BTC/USDT', qtd)
-        status = f"TRAVA: Compra falhou, venda recomprada ({rc})"
-    elif ok_c and ok_v:
-        status = "EXECUTADA COM SUCESSO"
-    else:
-        status = f"ERRO: {rc} | {rv}"
-    await okx.close()
-    await byb.close()
-    await avisar_tg(f"{dir_op} | {status} | Est: ${lucro_est:.4f}")
-    return status
-
 async def rodar_ciclo():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    url_okx = "".join(["https://", "aws.", "://okx.com"])
-    url_byb = "".join(["https://", "api.", "://bytick.com"])
-    async with aiohttp.ClientSession(headers=headers) as s:
-        r1 = await s.get(url_okx, timeout=8)
-        r2 = await s.get(url_byb, timeout=8)
-        d1 = await r1.json(content_type=None)
-        d2 = await r2.json(content_type=None)
-        t1 = d1["data"].pop(0)
-        t2 = d2["result"]["list"].pop(0)
+    okx, byb = criar_corretoras()
+    try:
+        t1, t2 = await asyncio.gather(
+            okx.publicGetMarketTicker({'instId': 'BTC-USDT'}),
+            byb.publicGetV5MarketTickers({'category': 'spot', 'symbol': 'BTCUSDT'})
+        )
+        d1 = t1['data'].pop(0)
+        d2 = t2['result']['list'].pop(0)
 
-    o_ask, o_ask_v = float(t1["askPx"]), float(t1["askSz"])
-    o_bid, o_bid_v = float(t1["bidPx"]), float(t1["bidSz"])
-    b_ask, b_ask_v = float(t2["ask1Price"]), float(t2["ask1Size"])
-    b_bid, b_bid_v = float(t2["bid1Price"]), float(t2["bid1Size"])
+        o_ask, o_ask_v = float(d1['askPx']), float(d1['askSz'])
+        o_bid, o_bid_v = float(d1['bidPx']), float(d1['bidSz'])
+        b_ask, b_ask_v = float(d2['ask1Price']), float(d2['ask1Size'])
+        b_bid, b_bid_v = float(d2['bid1Price']), float(d2['bid1Size'])
 
-    q1, lu1, lp1 = calc(o_ask, o_ask_v, tx_okx, b_bid, b_bid_v, tx_byb)
-    q2, lu2, lp2 = calc(b_ask, b_ask_v, tx_byb, o_bid, o_bid_v, tx_okx)
+        q1, lu1, lp1 = calc(o_ask, o_ask_v, tx_okx, b_bid, b_bid_v, tx_byb)
+        q2, lu2, lp2 = calc(b_ask, b_ask_v, tx_byb, o_bid, o_bid_v, tx_okx)
 
-    st_op = "Monitorando"
-    if lp1 >= lucro_min:
-        st_op = "SIMULADO OKX->BYB" if modo_sim else await executar(q1, "OKX->BYB", lu1)
-        if modo_sim:
-            await avisar_tg(f"Oportunidade OKX->BYB: {lp1:.4f}% (${lu1:.4f})")
-    elif lp2 >= lucro_min:
-        st_op = "SIMULADO BYB->OKX" if modo_sim else await executar(q2, "BYB->OKX", lu2)
-        if modo_sim:
-            await avisar_tg(f"Oportunidade BYB->OKX: {lp2:.4f}% (${lu2:.4f})")
+        st_op = "Monitorando"
+        if lp1 >= lucro_min:
+            if modo_sim:
+                st_op = "SIMULADO OKX->BYB"
+                await avisar_tg(f"Oportunidade OKX->BYB: {lp1:.4f}% (${lu1:.4f})")
+            else:
+                rc, rv = await asyncio.gather(
+                    okx.create_market_buy_order('BTC/USDT', q1),
+                    byb.create_market_sell_order('BTC/USDT', q1),
+                    return_exceptions=True
+                )
+                ok_c, ok_v = not isinstance(rc, Exception), not isinstance(rv, Exception)
+                if ok_c and not ok_v:
+                    await okx.create_market_sell_order('BTC/USDT', round(q1 * 0.9985, 6))
+                    st_op = f"TRAVA: Venda falhou, compra revertida ({rv})"
+                elif ok_v and not ok_c:
+                    await byb.create_market_buy_order('BTC/USDT', q1)
+                    st_op = f"TRAVA: Compra falhou, venda recomprada ({rc})"
+                elif ok_c and ok_v:
+                    st_op = "EXECUTADA OKX->BYB"
+                else:
+                    st_op = f"ERRO: {rc} | {rv}"
+                await avisar_tg(f"OKX->BYB | {st_op} | Est: ${lu1:.4f}")
 
-    return {
-        "Hora": datetime.now().strftime("%H:%M:%S"),
-        "OKX Ask": o_ask, "Bybit Bid": b_bid, "OKX->BYB %": round(lp1, 4), "OKX->BYB $": round(lu1, 4),
-        "Bybit Ask": b_ask, "OKX Bid": o_bid, "BYB->OKX %": round(lp2, 4), "BYB->OKX $": round(lu2, 4),
-        "Status": st_op
-    }
+        elif lp2 >= lucro_min:
+            if modo_sim:
+                st_op = "SIMULADO BYB->OKX"
+                await avisar_tg(f"Oportunidade BYB->OKX: {lp2:.4f}% (${lu2:.4f})")
+            else:
+                rc, rv = await asyncio.gather(
+                    byb.create_market_buy_order('BTC/USDT', q2),
+                    okx.create_market_sell_order('BTC/USDT', q2),
+                    return_exceptions=True
+                )
+                ok_c, ok_v = not isinstance(rc, Exception), not isinstance(rv, Exception)
+                if ok_c and not ok_v:
+                    await byb.create_market_sell_order('BTC/USDT', round(q2 * 0.9985, 6))
+                    st_op = f"TRAVA: Venda falhou, compra revertida ({rv})"
+                elif ok_v and not ok_c:
+                    await okx.create_market_buy_order('BTC/USDT', q2)
+                    st_op = f"TRAVA: Compra falhou, venda recomprada ({rc})"
+                elif ok_c and ok_v:
+                    st_op = "EXECUTADA BYB->OKX"
+                else:
+                    st_op = f"ERRO: {rc} | {rv}"
+                await avisar_tg(f"BYB->OKX | {st_op} | Est: ${lu2:.4f}")
+
+        return {
+            "Hora": datetime.now().strftime("%H:%M:%S"),
+            "OKX Ask": o_ask, "Bybit Bid": b_bid, "OKX->BYB %": round(lp1, 4), "OKX->BYB $": round(lu1, 4),
+            "Bybit Ask": b_ask, "OKX Bid": o_bid, "BYB->OKX %": round(lp2, 4), "BYB->OKX $": round(lu2, 4),
+            "Status": st_op
+        }
+    finally:
+        await okx.close()
+        await byb.close()
 
 if st.session_state.rodando:
     try:
