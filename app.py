@@ -5,41 +5,31 @@ import ccxt.async_support as ccxt
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="Arbitragem Pro: OKX x Bybit", layout="wide")
+st.set_page_config(page_title="Arbitragem OKX x Bybit", layout="wide")
 
 if "logs" not in st.session_state:
     st.session_state.logs = []
 if "rodando" not in st.session_state:
     st.session_state.rodando = False
 if "saldos" not in st.session_state:
-    st.session_state.saldos = {"okx_usdt": 0.0, "okx_btc": 0.0, "byb_usdt": 0.0, "byb_btc": 0.0}
+    st.session_state.saldos = {"okx_u": 0.0, "okx_b": 0.0, "byb_u": 0.0, "byb_b": 0.0}
 
-st.title("Arbitragem Spot Pro: OKX ↔ Bybit (BTC/USDT)")
+st.title("Arbitragem Spot: OKX ↔ Bybit (BTC/USDT)")
 
 with st.sidebar:
-    st.header("1. Controle Operacional")
-    modo_simulacao = st.toggle("Modo Simulação (Sem ordens reais)", value=True)
-    capital_usdt = st.number_input("Capital por operação (USDT)", min_value=15.0, value=100.0, step=10.0)
-    lucro_min_pct = st.number_input("Lucro Líquido Mínimo (%)", min_value=0.01, value=0.08, step=0.01, format="%.2f")
-    intervalo_seg = st.slider("Intervalo de leitura (seg)", min_value=2.0, max_value=15.0, value=4.0, step=0.5)
-
-    st.divider()
-    st.header("2. Taxas Taker (%)")
-    taxa_okx = st.number_input("Taxa OKX (%)", value=0.10, step=0.01, format="%.2f") / 100
-    taxa_bybit = st.number_input("Taxa Bybit (%)", value=0.10, step=0.01, format="%.2f") / 100
-
-    st.divider()
-    st.header("3. Alertas Telegram (Opcional)")
-    tg_token = st.text_input("Bot Token", type="password", value=st.secrets.get("TG_TOKEN", ""))
-    tg_chat_id = st.text_input("Chat ID", value=st.secrets.get("TG_CHAT_ID", ""))
-
-    st.divider()
-    st.header("4. Chaves API (Spot Trade)")
-    okx_key = st.text_input("OKX API Key", type="password", value=st.secrets.get("OKX_KEY", ""))
-    okx_secret = st.text_input("OKX Secret", type="password", value=st.secrets.get("OKX_SECRET", ""))
-    okx_pass = st.text_input("OKX Passphrase", type="password", value=st.secrets.get("OKX_PASS", ""))
-    byb_key = st.text_input("Bybit API Key", type="password", value=st.secrets.get("BYB_KEY", ""))
-    byb_secret = st.text_input("Bybit Secret", type="password", value=st.secrets.get("BYB_SECRET", ""))
+    modo_sim = st.toggle("Modo Simulação", value=True)
+    capital = st.number_input("Capital (USDT)", min_value=15.0, value=100.0, step=10.0)
+    lucro_min = st.number_input("Lucro Mínimo (%)", min_value=0.01, value=0.08, step=0.01, format="%.2f")
+    intervalo = st.slider("Intervalo (seg)", 2.0, 15.0, 4.0, 0.5)
+    tx_okx = st.number_input("Taxa OKX (%)", value=0.10, step=0.01, format="%.2f") / 100
+    tx_byb = st.number_input("Taxa Bybit (%)", value=0.10, step=0.01, format="%.2f") / 100
+    tg_token = st.text_input("Telegram Token", type="password", value=st.secrets.get("TG_TOKEN", ""))
+    tg_chat = st.text_input("Telegram Chat ID", value=st.secrets.get("TG_CHAT_ID", ""))
+    okx_k = st.text_input("OKX Key", type="password", value=st.secrets.get("OKX_KEY", ""))
+    okx_s = st.text_input("OKX Secret", type="password", value=st.secrets.get("OKX_SECRET", ""))
+    okx_p = st.text_input("OKX Passphrase", type="password", value=st.secrets.get("OKX_PASS", ""))
+    byb_k = st.text_input("Bybit Key", type="password", value=st.secrets.get("BYB_KEY", ""))
+    byb_s = st.text_input("Bybit Secret", type="password", value=st.secrets.get("BYB_SECRET", ""))
 
 c1, c2 = st.columns(2)
 if c1.button("▶ Iniciar Robô", type="primary", use_container_width=True):
@@ -47,183 +37,101 @@ if c1.button("▶ Iniciar Robô", type="primary", use_container_width=True):
 if c2.button("⏹ Parar", use_container_width=True):
     st.session_state.rodando = False
 
-area_status = st.empty()
+painel = st.empty()
 
-async def enviar_telegram(mensagem):
-    if not tg_token or not tg_chat_id:
-        return
-    url = f"https://telegram.org{tg_token}/sendMessage"
-    payload = {"chat_id": tg_chat_id, "text": mensagem, "parse_mode": "HTML"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            await session.post(url, json=payload, timeout=5)
-    except Exception:
-        pass
+async def avisar_tg(msg):
+    if tg_token and tg_chat:
+        url = f"https://telegram.org{tg_token}/sendMessage"
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json={"chat_id": tg_chat, "text": msg}, timeout=5)
 
-async def buscar_precos_diretos():
-    headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession(headers=headers) as session:
-        url_okx = "https://okx.com"
-        url_byb = "https://bytick.com"
-        
-        async with session.get(url_okx, timeout=8) as r1, session.get(url_byb, timeout=8) as r2:
-            if r1.status != 200:
-                raise Exception(f"OKX HTTP {r1.status}")
-            if r2.status != 200:
-                raise Exception(f"Bybit HTTP {r2.status} (IP do servidor bloqueado)")
-
-            d_okx = await r1.json()
-            d_byb = await r2.json()
-
-            if d_okx.get("code") != "0":
-                raise Exception(f"OKX erro: {d_okx.get('msg')}")
-            if d_byb.get("retCode") != 0:
-                raise Exception(f"Bybit erro: {d_byb.get('retMsg')}")
-
-            t_okx = d_okx["data"]
-            t_byb = d_byb["result"]["list"]
-
-            return {
-                "okx_ask": float(t_okx["askPx"]),
-                "okx_ask_vol": float(t_okx["askSz"]),
-                "okx_bid": float(t_okx["bidPx"]),
-                "okx_bid_vol": float(t_okx["bidSz"]),
-                "byb_ask": float(t_byb["ask1Price"]),
-                "byb_ask_vol": float(t_byb["ask1Size"]),
-                "byb_bid": float(t_byb["bid1Price"]),
-                "byb_bid_vol": float(t_byb["bid1Size"]),
-            }
-
-def calcular_rota(preco_compra, vol_compra, tx_compra, preco_venda, vol_venda, tx_venda, capital):
-    qtd_desejada = capital / preco_compra
-    qtd_btc = min(qtd_desejada, vol_compra, vol_venda)
-    if qtd_btc <= 0:
+def calc(p_comp, v_comp, t_comp, p_vend, v_vend, t_vend):
+    qtd = min(capital / p_comp, v_comp, v_vend)
+    if qtd <= 0:
         return 0.0, 0.0, 0.0
+    custo = (qtd * p_comp) * (1 + t_comp)
+    receita = (qtd * p_vend) * (1 - t_vend)
+    lucro = receita - custo
+    return round(qtd, 6), lucro, (lucro / custo) * 100
 
-    custo_usdt = qtd_btc * preco_compra
-    btc_liq = qtd_btc * (1 - tx_compra)
-    custo_taxa_compra_usdt = (qtd_btc - btc_liq) * preco_compra
-    custo_total = custo_usdt + custo_taxa_compra_usdt
-
-    receita_liq = (qtd_btc * preco_venda) * (1 - tx_venda)
-    lucro_usdt = receita_liq - custo_total
-    lucro_pct = (lucro_usdt / custo_total) * 100
-    return round(qtd_btc, 6), lucro_usdt, lucro_pct
-
-async def executar_com_trava_seguranca(qtd_btc, direcao, lucro_est):
-    okx = ccxt.okx({
-        'apiKey': okx_key, 'secret': okx_secret, 'password': okx_pass,
-        'enableRateLimit': True, 'options': {'defaultType': 'spot', 'fetchMarkets': False}
-    })
-    bybit = ccxt.bybit({
-        'apiKey': byb_key, 'secret': byb_secret,
-        'enableRateLimit': True, 'options': {'defaultType': 'spot', 'fetchMarkets': False}
-    })
-
-    ex_compra = okx if direcao == "OKX → BYB" else bybit
-    ex_venda = bybit if direcao == "OKX → BYB" else okx
-
-    try:
-        res_compra, res_venda = await asyncio.gather(
-            ex_compra.create_market_buy_order('BTC/USDT', qtd_btc),
-            ex_venda.create_market_sell_order('BTC/USDT', qtd_btc),
-            return_exceptions=True
-        )
-
-        compra_ok = not isinstance(res_compra, Exception)
-        venda_ok = not isinstance(res_venda, Exception)
-
-        if compra_ok and venda_ok:
-            msg = f"✅ <b>ARBITRAGEM EXECUTADA ({direcao})</b>\nQtd: {qtd_btc} BTC\nLucro Est.: ${lucro_est:.4f}"
-            await enviar_telegram(msg)
-            return "EXECUTADA COM SUCESSO"
-        elif compra_ok and not venda_ok:
-            try:
-                qtd_liquida = round(qtd_btc * 0.9985, 6)
-                await ex_compra.create_market_sell_order('BTC/USDT', qtd_liquida)
-                acao = "Compra revertida a mercado."
-            except Exception as e_rev:
-                acao = f"FALHA REVERSÃO: {e_rev}"
-            await enviar_telegram(f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nVenda falhou: {res_venda}\n{acao}")
-            return f"TRAVA: {acao}"
-        elif venda_ok and not compra_ok:
-            try:
-                await ex_venda.create_market_buy_order('BTC/USDT', qtd_btc)
-                acao = "Venda recomprada a mercado."
-            except Exception as e_rev:
-                acao = f"FALHA RECOMPRA: {e_rev}"
-            await enviar_telegram(f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nCompra falhou: {res_compra}\n{acao}")
-            return f"TRAVA: {acao}"
-        else:
-            return f"ERRO AMBAS PONTAS: {res_compra} | {res_venda}"
-    finally:
-        await okx.close()
-        await bybit.close()
-
-async def ciclo_monitoramento():
-    if okx_key and byb_key:
-        okx = ccxt.okx({'apiKey': okx_key, 'secret': okx_secret, 'password': okx_pass, 'options': {'fetchMarkets': False}})
-        bybit = ccxt.bybit({'apiKey': byb_key, 'secret': byb_secret, 'options': {'fetchMarkets': False}})
-        try:
-            bal_okx, bal_byb = await asyncio.gather(okx.fetch_balance(), bybit.fetch_balance())
-            st.session_state.saldos = {
-                "okx_usdt": float(bal_okx.get('USDT', {}).get('free', 0.0)),
-                "okx_btc": float(bal_okx.get('BTC', {}).get('free', 0.0)),
-                "byb_usdt": float(bal_byb.get('USDT', {}).get('free', 0.0)),
-                "byb_btc": float(bal_byb.get('BTC', {}).get('free', 0.0)),
-            }
-        except Exception:
-            pass
-        finally:
-            await okx.close()
-            await bybit.close()
-
-    precos = await buscar_precos_diretos()
-
-    q1, l_usdt1, l_pct1 = calcular_rota(
-        precos["okx_ask"], precos["okx_ask_vol"], taxa_okx,
-        precos["byb_bid"], precos["byb_bid_vol"], taxa_bybit, capital_usdt
+async def executar(qtd, dir_op, lucro_est):
+    okx = ccxt.okx({'apiKey': okx_k, 'secret': okx_s, 'password': okx_p, 'options': {'fetchMarkets': False}})
+    byb = ccxt.bybit({'apiKey': byb_k, 'secret': byb_s, 'options': {'fetchMarkets': False}})
+    ex_c = okx if dir_op == "OKX->BYB" else byb
+    ex_v = byb if dir_op == "OKX->BYB" else okx
+    rc, rv = await asyncio.gather(
+        ex_c.create_market_buy_order('BTC/USDT', qtd),
+        ex_v.create_market_sell_order('BTC/USDT', qtd),
+        return_exceptions=True
     )
-    q2, l_usdt2, l_pct2 = calcular_rota(
-        precos["byb_ask"], precos["byb_ask_vol"], taxa_bybit,
-        precos["okx_bid"], precos["okx_bid_vol"], taxa_okx, capital_usdt
-    )
+    ok_c, ok_v = not isinstance(rc, Exception), not isinstance(rv, Exception)
+    if ok_c and not ok_v:
+        await ex_c.create_market_sell_order('BTC/USDT', round(qtd * 0.9985, 6))
+        status = f"TRAVA: Venda falhou, compra revertida ({rv})"
+    elif ok_v and not ok_c:
+        await ex_v.create_market_buy_order('BTC/USDT', qtd)
+        status = f"TRAVA: Compra falhou, venda recomprada ({rc})"
+    elif ok_c and ok_v:
+        status = "EXECUTADA COM SUCESSO"
+    else:
+        status = f"ERRO: {rc} | {rv}"
+    await okx.close()
+    await byb.close()
+    await avisar_tg(f"{dir_op} | {status} | Est: ${lucro_est:.4f}")
+    return status
 
-    status_exec = "Monitorando"
+async def rodar_ciclo():
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession(headers=headers) as s:
+        r1 = await s.get("https://okx.com", timeout=8)
+        r2 = await s.get("https://bytick.com", timeout=8)
+        if r1.status != 200 or r2.status != 200:
+            raise Exception(f"Bloqueio HTTP: OKX={r1.status}, Bybit={r2.status}")
+        d1, d2 = await r1.json(), await r2.json()
+        t1, t2 = d1["data"][0], d2["result"]["list"][0]
 
-    if l_pct1 >= lucro_min_pct:
-        if modo_simulacao:
-            status_exec = "SIMULAÇÃO: OKX → BYB"
-            await enviar_telegram(f"🔔 <b>Oportunidade Simulada (OKX → Bybit)</b>\nLucro Líq.: {l_pct1:.4f}% (${l_usdt1:.4f})")
-        elif okx_key and byb_key:
-            if st.session_state.saldos["okx_usdt"] >= capital_usdt and st.session_state.saldos["byb_btc"] >= q1:
-                status_exec = await executar_com_trava_seguranca(q1, "OKX → BYB", l_usdt1)
-            else:
-                status_exec = "BLOQUEADO: Saldo insuficiente"
+    o_ask, o_ask_v = float(t1["askPx"]), float(t1["askSz"])
+    o_bid, o_bid_v = float(t1["bidPx"]), float(t1["bidSz"])
+    b_ask, b_ask_v = float(t2["ask1Price"]), float(t2["ask1Size"])
+    b_bid, b_bid_v = float(t2["bid1Price"]), float(t2["bid1Size"])
 
-    elif l_pct2 >= lucro_min_pct:
-        if modo_simulacao:
-            status_exec = "SIMULAÇÃO: BYB → OKX"
-            await enviar_telegram(f"🔔 <b>Oportunidade Simulada (Bybit → OKX)</b>\nLucro Líq.: {l_pct2:.4f}% (${l_usdt2:.4f})")
-        elif okx_key and byb_key:
-            if st.session_state.saldos["byb_usdt"] >= capital_usdt and st.session_state.saldos["okx_btc"] >= q2:
-                status_exec = await executar_com_trava_seguranca(q2, "BYB → OKX", l_usdt2)
-            else:
-                status_exec = "BLOQUEADO: Saldo insuficiente"
+    q1, lu1, lp1 = calc(o_ask, o_ask_v, tx_okx, b_bid, b_bid_v, tx_byb)
+    q2, lu2, lp2 = calc(b_ask, b_ask_v, tx_byb, o_bid, o_bid_v, tx_okx)
+
+    st_op = "Monitorando"
+    if lp1 >= lucro_min:
+        st_op = "SIMULADO OKX->BYB" if modo_sim else await executar(q1, "OKX->BYB", lu1)
+        if modo_sim:
+            await avisar_tg(f"Oportunidade OKX->BYB: {lp1:.4f}% (${lu1:.4f})")
+    elif lp2 >= lucro_min:
+        st_op = "SIMULADO BYB->OKX" if modo_sim else await executar(q2, "BYB->OKX", lu2)
+        if modo_sim:
+            await avisar_tg(f"Oportunidade BYB->OKX: {lp2:.4f}% (${lu2:.4f})")
 
     return {
         "Hora": datetime.now().strftime("%H:%M:%S"),
-        "OKX Ask": precos["okx_ask"],
-        "Bybit Bid": precos["byb_bid"],
-        "OKX→BYB (%)": round(l_pct1, 4),
-        "OKX→BYB ($)": round(l_usdt1, 4),
-        "Bybit Ask": precos["byb_ask"],
-        "OKX Bid": precos["okx_bid"],
-        "BYB→OKX (%)": round(l_pct2, 4),
-        "BYB→OKX ($)": round(l_usdt2, 4),
-        "Status": status_exec
+        "OKX Ask": o_ask, "Bybit Bid": b_bid, "OKX->BYB %": round(lp1, 4), "OKX->BYB $": round(lu1, 4),
+        "Bybit Ask": b_ask, "OKX Bid": o_bid, "BYB->OKX %": round(lp2, 4), "BYB->OKX $": round(lu2, 4),
+        "Status": st_op
     }
 
 if st.session_state.rodando:
     try:
-        dados = asyncio.run(ciclo_monitoramento())
+        res = asyncio.run(rodar_ciclo())
+        st.session_state.logs.insert(0, res)
+        st.session_state.logs = st.session_state.logs[:50]
+        with painel.container():
+            st.success(f"Ativo — {res['Hora']}")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("OKX Ask", f"${res['OKX Ask']:,.2f}", f"Bid: ${res['OKX Bid']:,.2f}", delta_color="off")
+            m2.metric("Bybit Ask", f"${res['Bybit Ask']:,.2f}", f"Bid: ${res['Bybit Bid']:,.2f}", delta_color="off")
+            m3.metric("OKX → Bybit", f"{res['OKX->BYB %']:+.4f}%", f"${res['OKX->BYB $']:+.4f}")
+            m4.metric("Bybit → OKX", f"{res['BYB->OKX %']:+.4f}%", f"${res['BYB->OKX $']:+.4f}")
+            st.dataframe(pd.DataFrame(st.session_state.logs), use_container_width=True, hide_index=True)
+    except Exception as e:
+        painel.error(f"Aviso: {e}")
+    asyncio.run(asyncio.sleep(intervalo))
+    st.rerun()
+else:
+    painel.info("Toque em **▶ Iniciar Robô** para começar.")
+# === FIM DO CODIGO ===
