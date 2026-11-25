@@ -21,7 +21,7 @@ with st.sidebar:
     modo_simulacao = st.toggle("Modo Simulação (Sem ordens reais)", value=True)
     capital_usdt = st.number_input("Capital por operação (USDT)", min_value=15.0, value=100.0, step=10.0)
     lucro_min_pct = st.number_input("Lucro Líquido Mínimo (%)", min_value=0.01, value=0.08, step=0.01, format="%.2f")
-    intervalo_seg = st.slider("Intervalo de leitura (seg)", min_value=1.0, max_value=10.0, value=2.0, step=0.5)
+    intervalo_seg = st.slider("Intervalo de leitura (seg)", min_value=2.0, max_value=15.0, value=4.0, step=0.5)
 
     st.divider()
     st.header("2. Taxas Taker (%)")
@@ -58,6 +58,34 @@ async def enviar_telegram(mensagem):
     except Exception:
         pass
 
+async def buscar_precos_diretos():
+    async with aiohttp.ClientSession() as session:
+        url_okx = "https://okx.com"
+        url_byb = "https://bybit.com"
+        
+        async with session.get(url_okx, timeout=5) as r1, session.get(url_byb, timeout=5) as r2:
+            d_okx = await r1.json()
+            d_byb = await r2.json()
+
+            if d_okx.get("code") != "0":
+                raise Exception(f"OKX bloqueou temporariamente: {d_okx.get('msg')}")
+            if d_byb.get("retCode") != 0:
+                raise Exception(f"Bybit bloqueou temporariamente: {d_byb.get('retMsg')}")
+
+            t_okx = d_okx["data"]
+            t_byb = d_byb["result"]["list"]
+
+            return {
+                "okx_ask": float(t_okx["askPx"]),
+                "okx_ask_vol": float(t_okx["askSz"]),
+                "okx_bid": float(t_okx["bidPx"]),
+                "okx_bid_vol": float(t_okx["bidSz"]),
+                "byb_ask": float(t_byb["ask1Price"]),
+                "byb_ask_vol": float(t_byb["ask1Size"]),
+                "byb_bid": float(t_byb["bid1Price"]),
+                "byb_bid_vol": float(t_byb["bid1Size"]),
+            }
+
 def calcular_rota(preco_compra, vol_compra, tx_compra, preco_venda, vol_venda, tx_venda, capital):
     qtd_desejada = capital / preco_compra
     qtd_btc = min(qtd_desejada, vol_compra, vol_venda)
@@ -74,123 +102,119 @@ def calcular_rota(preco_compra, vol_compra, tx_compra, preco_venda, vol_venda, t
     lucro_pct = (lucro_usdt / custo_total) * 100
     return round(qtd_btc, 6), lucro_usdt, lucro_pct
 
-async def executar_com_trava_seguranca(ex_compra, ex_venda, qtd_btc, direcao, lucro_est):
-    res_compra, res_venda = await asyncio.gather(
-        ex_compra.create_market_buy_order('BTC/USDT', qtd_btc),
-        ex_venda.create_market_sell_order('BTC/USDT', qtd_btc),
-        return_exceptions=True
-    )
-
-    compra_ok = not isinstance(res_compra, Exception)
-    venda_ok = not isinstance(res_venda, Exception)
-
-    if compra_ok and venda_ok:
-        msg = f"✅ <b>ARBITRAGEM EXECUTADA ({direcao})</b>\nQtd: {qtd_btc} BTC\nLucro Est.: ${lucro_est:.4f}"
-        await enviar_telegram(msg)
-        return "EXECUTADA COM SUCESSO"
-
-    elif compra_ok and not venda_ok:
-        try:
-            qtd_liquida = round(qtd_btc * 0.9985, 6)
-            await ex_compra.create_market_sell_order('BTC/USDT', qtd_liquida)
-            acao_emergencia = "Compra revertida a mercado com sucesso."
-        except Exception as e_rev:
-            acao_emergencia = f"FALHA AO REVERTER COMPRA: {e_rev}"
-        
-        msg = f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nVenda falhou: {res_venda}\nAção: {acao_emergencia}"
-        await enviar_telegram(msg)
-        return f"TRAVA: Venda falhou ({acao_emergencia})"
-
-    elif venda_ok and not compra_ok:
-        try:
-            await ex_venda.create_market_buy_order('BTC/USDT', qtd_btc)
-            acao_emergencia = "Venda recomprada a mercado com sucesso."
-        except Exception as e_rev:
-            acao_emergencia = f"FALHA AO RECOMPRAR: {e_rev}"
-
-        msg = f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nCompra falhou: {res_compra}\nAção: {acao_emergencia}"
-        await enviar_telegram(msg)
-        return f"TRAVA: Compra falhou ({acao_emergencia})"
-
-    else:
-        return f"ERRO EM AMBAS AS PONTAS: C={res_compra} | V={res_venda}"
-
-async def ciclo_monitoramento():
+async def executar_com_trava_seguranca(qtd_btc, direcao, lucro_est):
     okx = ccxt.okx({
         'apiKey': okx_key, 'secret': okx_secret, 'password': okx_pass,
-        'enableRateLimit': True, 'options': {'defaultType': 'spot'}
+        'enableRateLimit': True, 'options': {'defaultType': 'spot', 'fetchMarkets': False}
     })
     bybit = ccxt.bybit({
         'apiKey': byb_key, 'secret': byb_secret,
-        'enableRateLimit': True, 'options': {'defaultType': 'spot'}
+        'enableRateLimit': True, 'options': {'defaultType': 'spot', 'fetchMarkets': False}
     })
 
+    ex_compra = okx if direcao == "OKX → BYB" else bybit
+    ex_venda = bybit if direcao == "OKX → BYB" else okx
+
     try:
-        if okx_key and byb_key:
+        res_compra, res_venda = await asyncio.gather(
+            ex_compra.create_market_buy_order('BTC/USDT', qtd_btc),
+            ex_venda.create_market_sell_order('BTC/USDT', qtd_btc),
+            return_exceptions=True
+        )
+
+        compra_ok = not isinstance(res_compra, Exception)
+        venda_ok = not isinstance(res_venda, Exception)
+
+        if compra_ok and venda_ok:
+            msg = f"✅ <b>ARBITRAGEM EXECUTADA ({direcao})</b>\nQtd: {qtd_btc} BTC\nLucro Est.: ${lucro_est:.4f}"
+            await enviar_telegram(msg)
+            return "EXECUTADA COM SUCESSO"
+        elif compra_ok and not venda_ok:
             try:
-                bal_okx, bal_byb = await asyncio.gather(okx.fetch_balance(), bybit.fetch_balance())
-                st.session_state.saldos = {
-                    "okx_usdt": float(bal_okx.get('USDT', {}).get('free', 0.0)),
-                    "okx_btc": float(bal_okx.get('BTC', {}).get('free', 0.0)),
-                    "byb_usdt": float(bal_byb.get('USDT', {}).get('free', 0.0)),
-                    "byb_btc": float(bal_byb.get('BTC', {}).get('free', 0.0)),
-                }
-            except Exception:
-                pass
-
-        ob_okx, ob_byb = await asyncio.gather(
-            okx.fetch_order_book('BTC/USDT', limit=5),
-            bybit.fetch_order_book('BTC/USDT', limit=5)
-        )
-
-        # Rota 1: Compra OKX (asks[0]) -> Vende Bybit (bids[0])
-        q1, l_usdt1, l_pct1 = calcular_rota(
-            ob_okx['asks'][0][0], ob_okx['asks'][0][1], taxa_okx,
-            ob_byb['bids'][0][0], ob_byb['bids'][0][1], taxa_bybit, capital_usdt
-        )
-        # Rota 2: Compra Bybit (asks[0]) -> Vende OKX (bids[0])
-        q2, l_usdt2, l_pct2 = calcular_rota(
-            ob_byb['asks'][0][0], ob_byb['asks'][0][1], taxa_bybit,
-            ob_okx['bids'][0][0], ob_okx['bids'][0][1], taxa_okx, capital_usdt
-        )
-
-        status_exec = "Monitorando"
-
-        if l_pct1 >= lucro_min_pct:
-            if modo_simulacao:
-                status_exec = "SIMULAÇÃO: OKX → BYB"
-                await enviar_telegram(f"🔔 <b>Oportunidade Simulada (OKX → Bybit)</b>\nLucro Líq.: {l_pct1:.4f}% (${l_usdt1:.4f})")
-            elif okx_key and byb_key:
-                if st.session_state.saldos["okx_usdt"] >= capital_usdt and st.session_state.saldos["byb_btc"] >= q1:
-                    status_exec = await executar_com_trava_seguranca(okx, bybit, q1, "OKX → BYB", l_usdt1)
-                else:
-                    status_exec = "BLOQUEADO: Saldo insuficiente OKX(USDT) ou BYB(BTC)"
-
-        elif l_pct2 >= lucro_min_pct:
-            if modo_simulacao:
-                status_exec = "SIMULAÇÃO: BYB → OKX"
-                await enviar_telegram(f"🔔 <b>Oportunidade Simulada (Bybit → OKX)</b>\nLucro Líq.: {l_pct2:.4f}% (${l_usdt2:.4f})")
-            elif okx_key and byb_key:
-                if st.session_state.saldos["byb_usdt"] >= capital_usdt and st.session_state.saldos["okx_btc"] >= q2:
-                    status_exec = await executar_com_trava_seguranca(bybit, okx, q2, "BYB → OKX", l_usdt2)
-                else:
-                    status_exec = "BLOQUEADO: Saldo insuficiente BYB(USDT) ou OKX(BTC)"
-
-        return {
-            "Hora": datetime.now().strftime("%H:%M:%S"),
-            "OKX Ask": ob_okx['asks'][0][0],
-            "Bybit Bid": ob_byb['bids'][0][0],
-            "OKX→BYB (%)": round(l_pct1, 4),
-            "OKX→BYB ($)": round(l_usdt1, 4),
-            "Bybit Ask": ob_byb['asks'][0][0],
-            "OKX Bid": ob_okx['bids'][0][0],
-            "BYB→OKX (%)": round(l_pct2, 4),
-            "BYB→OKX ($)": round(l_usdt2, 4),
-            "Status": status_exec
-        }
+                qtd_liquida = round(qtd_btc * 0.9985, 6)
+                await ex_compra.create_market_sell_order('BTC/USDT', qtd_liquida)
+                acao = "Compra revertida a mercado."
+            except Exception as e_rev:
+                acao = f"FALHA REVERSÃO: {e_rev}"
+            await enviar_telegram(f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nVenda falhou: {res_venda}\n{acao}")
+            return f"TRAVA: {acao}"
+        elif venda_ok and not compra_ok:
+            try:
+                await ex_venda.create_market_buy_order('BTC/USDT', qtd_btc)
+                acao = "Venda recomprada a mercado."
+            except Exception as e_rev:
+                acao = f"FALHA RECOMPRA: {e_rev}"
+            await enviar_telegram(f"🚨 <b>TRAVA ACIONADA ({direcao})</b>\nCompra falhou: {res_compra}\n{acao}")
+            return f"TRAVA: {acao}"
+        else:
+            return f"ERRO AMBAS PONTAS: {res_compra} | {res_venda}"
     finally:
         await okx.close()
         await bybit.close()
+
+async def ciclo_monitoramento():
+    if okx_key and byb_key:
+        okx = ccxt.okx({'apiKey': okx_key, 'secret': okx_secret, 'password': okx_pass, 'options': {'fetchMarkets': False}})
+        bybit = ccxt.bybit({'apiKey': byb_key, 'secret': byb_secret, 'options': {'fetchMarkets': False}})
+        try:
+            bal_okx, bal_byb = await asyncio.gather(okx.fetch_balance(), bybit.fetch_balance())
+            st.session_state.saldos = {
+                "okx_usdt": float(bal_okx.get('USDT', {}).get('free', 0.0)),
+                "okx_btc": float(bal_okx.get('BTC', {}).get('free', 0.0)),
+                "byb_usdt": float(bal_byb.get('USDT', {}).get('free', 0.0)),
+                "byb_btc": float(bal_byb.get('BTC', {}).get('free', 0.0)),
+            }
+        except Exception:
+            pass
+        finally:
+            await okx.close()
+            await bybit.close()
+
+    precos = await buscar_precos_diretos()
+
+    q1, l_usdt1, l_pct1 = calcular_rota(
+        precos["okx_ask"], precos["okx_ask_vol"], taxa_okx,
+        precos["byb_bid"], precos["byb_bid_vol"], taxa_bybit, capital_usdt
+    )
+    q2, l_usdt2, l_pct2 = calcular_rota(
+        precos["byb_ask"], precos["byb_ask_vol"], taxa_bybit,
+        precos["okx_bid"], precos["okx_bid_vol"], taxa_okx, capital_usdt
+    )
+
+    status_exec = "Monitorando"
+
+    if l_pct1 >= lucro_min_pct:
+        if modo_simulacao:
+            status_exec = "SIMULAÇÃO: OKX → BYB"
+            await enviar_telegram(f"🔔 <b>Oportunidade Simulada (OKX → Bybit)</b>\nLucro Líq.: {l_pct1:.4f}% (${l_usdt1:.4f})")
+        elif okx_key and byb_key:
+            if st.session_state.saldos["okx_usdt"] >= capital_usdt and st.session_state.saldos["byb_btc"] >= q1:
+                status_exec = await executar_com_trava_seguranca(q1, "OKX → BYB", l_usdt1)
+            else:
+                status_exec = "BLOQUEADO: Saldo insuficiente"
+
+    elif l_pct2 >= lucro_min_pct:
+        if modo_simulacao:
+            status_exec = "SIMULAÇÃO: BYB → OKX"
+            await enviar_telegram(f"🔔 <b>Oportunidade Simulada (Bybit → OKX)</b>\nLucro Líq.: {l_pct2:.4f}% (${l_usdt2:.4f})")
+        elif okx_key and byb_key:
+            if st.session_state.saldos["byb_usdt"] >= capital_usdt and st.session_state.saldos["okx_btc"] >= q2:
+                status_exec = await executar_com_trava_seguranca(q2, "BYB → OKX", l_usdt2)
+            else:
+                status_exec = "BLOQUEADO: Saldo insuficiente"
+
+    return {
+        "Hora": datetime.now().strftime("%H:%M:%S"),
+        "OKX Ask": precos["okx_ask"],
+        "Bybit Bid": precos["byb_bid"],
+        "OKX→BYB (%)": round(l_pct1, 4),
+        "OKX→BYB ($)": round(l_usdt1, 4),
+        "Bybit Ask": precos["byb_ask"],
+        "OKX Bid": precos["okx_bid"],
+        "BYB→OKX (%)": round(l_pct2, 4),
+        "BYB→OKX ($)": round(l_usdt2, 4),
+        "Status": status_exec
+    }
 
 st.subheader("Saldos Disponíveis (Conta Trading)")
 s = st.session_state.saldos
@@ -201,23 +225,3 @@ sc3.metric("Bybit — USDT Livre", f"${s['byb_usdt']:,.2f}")
 sc4.metric("Bybit — BTC Livre", f"{s['byb_btc']:.6f} BTC")
 
 st.divider()
-
-if st.session_state.rodando:
-    dados = asyncio.run(ciclo_monitoramento())
-    st.session_state.logs.insert(0, dados)
-    st.session_state.logs = st.session_state.logs[:100]
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("OKX (Ask / Bid)", f"${dados['OKX Ask']:,.2f}", f"Bid: ${dados['OKX Bid']:,.2f}", delta_color="off")
-    m2.metric("Bybit (Ask / Bid)", f"${dados['Bybit Ask']:,.2f}", f"Bid: ${dados['Bybit Bid']:,.2f}", delta_color="off")
-    m3.metric("Lucro Líq. OKX → Bybit", f"{dados['OKX→BYB (%)']:+.4f}%", f"${dados['OKX→BYB ($)']:+.4f}")
-    m4.metric("Lucro Líq. Bybit → OKX", f"{dados['BYB→OKX (%)']:+.4f}%", f"${dados['BYB→OKX ($)']:+.4f}")
-
-    st.subheader("Registro de Execução e Spreads")
-    df = pd.DataFrame(st.session_state.logs)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    asyncio.run(asyncio.sleep(intervalo_seg))
-    st.rerun()
-else:
-    st.info("Configure suas credenciais na barra lateral (ou via Secrets) e clique em **Iniciar Robô**.")
