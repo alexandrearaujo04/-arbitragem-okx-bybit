@@ -47,6 +47,8 @@ if c1.button("▶ Iniciar Robô", type="primary", use_container_width=True):
 if c2.button("⏹ Parar", use_container_width=True):
     st.session_state.rodando = False
 
+area_status = st.empty()
+
 async def enviar_telegram(mensagem):
     if not tg_token or not tg_chat_id:
         return
@@ -59,18 +61,24 @@ async def enviar_telegram(mensagem):
         pass
 
 async def buscar_precos_diretos():
-    async with aiohttp.ClientSession() as session:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession(headers=headers) as session:
         url_okx = "https://okx.com"
-        url_byb = "https://bybit.com"
+        url_byb = "https://bytick.com"
         
-        async with session.get(url_okx, timeout=5) as r1, session.get(url_byb, timeout=5) as r2:
+        async with session.get(url_okx, timeout=8) as r1, session.get(url_byb, timeout=8) as r2:
+            if r1.status != 200:
+                raise Exception(f"OKX HTTP {r1.status}")
+            if r2.status != 200:
+                raise Exception(f"Bybit HTTP {r2.status} (IP do servidor bloqueado)")
+
             d_okx = await r1.json()
             d_byb = await r2.json()
 
             if d_okx.get("code") != "0":
-                raise Exception(f"OKX bloqueou temporariamente: {d_okx.get('msg')}")
+                raise Exception(f"OKX erro: {d_okx.get('msg')}")
             if d_byb.get("retCode") != 0:
-                raise Exception(f"Bybit bloqueou temporariamente: {d_byb.get('retMsg')}")
+                raise Exception(f"Bybit erro: {d_byb.get('retMsg')}")
 
             t_okx = d_okx["data"]
             t_byb = d_byb["result"]["list"]
@@ -216,12 +224,6 @@ async def ciclo_monitoramento():
         "Status": status_exec
     }
 
-st.subheader("Saldos Disponíveis (Conta Trading)")
-s = st.session_state.saldos
-sc1, sc2, sc3, sc4 = st.columns(4)
-sc1.metric("OKX — USDT Livre", f"${s['okx_usdt']:,.2f}")
-sc2.metric("OKX — BTC Livre", f"{s['okx_btc']:.6f} BTC")
-sc3.metric("Bybit — USDT Livre", f"${s['byb_usdt']:,.2f}")
-sc4.metric("Bybit — BTC Livre", f"{s['byb_btc']:.6f} BTC")
-
-st.divider()
+if st.session_state.rodando:
+    try:
+        dados = asyncio.run(ciclo_monitoramento())
