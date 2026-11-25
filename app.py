@@ -80,13 +80,15 @@ async def executar(qtd, dir_op, lucro_est):
 
 async def rodar_ciclo():
     headers = {"User-Agent": "Mozilla/5.0"}
+    url_okx = "".join(["https://", "aws.", "://okx.com"])
+    url_byb = "".join(["https://", "api.", "://bytick.com"])
     async with aiohttp.ClientSession(headers=headers) as s:
-        r1 = await s.get("https://://okx.com/api/v5/market/ticker?instId=BTC-USDT", timeout=8)
-        r2 = await s.get("https://bytick.com", timeout=8)
+        r1 = await s.get(url_okx, timeout=8)
+        r2 = await s.get(url_byb, timeout=8)
         d1 = await r1.json(content_type=None)
         d2 = await r2.json(content_type=None)
-        t1 = d1["data"][0]
-        t2 = d2["result"]["list"][0]
+        t1 = d1["data"].pop(0)
+        t2 = d2["result"]["list"].pop(0)
 
     o_ask, o_ask_v = float(t1["askPx"]), float(t1["askSz"])
     o_bid, o_bid_v = float(t1["bidPx"]), float(t1["bidSz"])
