@@ -11,8 +11,6 @@ if "logs" not in st.session_state:
     st.session_state.logs = []
 if "rodando" not in st.session_state:
     st.session_state.rodando = False
-if "saldos" not in st.session_state:
-    st.session_state.saldos = {"okx_u": 0.0, "okx_b": 0.0, "byb_u": 0.0, "byb_b": 0.0}
 
 st.title("Arbitragem Spot: OKX ↔ Bybit (BTC/USDT)")
 
@@ -55,8 +53,8 @@ def calc(p_comp, v_comp, t_comp, p_vend, v_vend, t_vend):
     return round(qtd, 6), lucro, (lucro / custo) * 100
 
 async def executar(qtd, dir_op, lucro_est):
-    okx = ccxt.okx({'apiKey': okx_k, 'secret': okx_s, 'password': okx_p, 'options': {'fetchMarkets': False}})
-    byb = ccxt.bybit({'apiKey': byb_k, 'secret': byb_s, 'options': {'fetchMarkets': False}})
+    okx = ccxt.okx({'apiKey': okx_k, 'secret': okx_s, 'password': okx_p, 'hostname': '://okx.com', 'options': {'fetchMarkets': False}})
+    byb = ccxt.bybit({'apiKey': byb_k, 'secret': byb_s, 'hostname': 'bytick.com', 'options': {'fetchMarkets': False}})
     ex_c = okx if dir_op == "OKX->BYB" else byb
     ex_v = byb if dir_op == "OKX->BYB" else okx
     rc, rv = await asyncio.gather(
@@ -83,12 +81,12 @@ async def executar(qtd, dir_op, lucro_est):
 async def rodar_ciclo():
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as s:
-        r1 = await s.get("https://okx.com", timeout=8)
+        r1 = await s.get("https://://okx.com/api/v5/market/ticker?instId=BTC-USDT", timeout=8)
         r2 = await s.get("https://bytick.com", timeout=8)
-        if r1.status != 200 or r2.status != 200:
-            raise Exception(f"Bloqueio HTTP: OKX={r1.status}, Bybit={r2.status}")
-        d1, d2 = await r1.json(), await r2.json()
-        t1, t2 = d1["data"][0], d2["result"]["list"][0]
+        d1 = await r1.json(content_type=None)
+        d2 = await r2.json(content_type=None)
+        t1 = d1["data"][0]
+        t2 = d2["result"]["list"][0]
 
     o_ask, o_ask_v = float(t1["askPx"]), float(t1["askSz"])
     o_bid, o_bid_v = float(t1["bidPx"]), float(t1["bidSz"])
